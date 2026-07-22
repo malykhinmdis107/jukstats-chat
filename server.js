@@ -164,3 +164,22 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`✅ CHAT:${PORT}`));
+
+// ===== РОЛИ САЙТА =====
+app.get('/api/chat/:clanId/roles', async (req, res) => {
+  if (!db) return res.json({});
+  try {
+    const doc = await db.collection('clans').doc(req.params.clanId)
+      .collection('moderation').doc('roles').get();
+    res.json(doc.exists ? doc.data() : {});
+  } catch(e) { res.json({}); }
+});
+
+app.post('/api/chat/:clanId/roles', async (req, res) => {
+  if (!db) return res.json({ success: false });
+  try {
+    await db.collection('clans').doc(req.params.clanId)
+      .collection('moderation').doc('roles').set(req.body);
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
