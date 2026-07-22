@@ -254,5 +254,17 @@ app.get('/api/chat/:clanId/debug', async (req, res) => {
   }
 });
 
+// ДИАГНОСТИКА — ЗАПУСТИТСЯ ПРИ СТАРТЕ
+setTimeout(async () => {
+  if (!db) return console.log('❌ Нет БД');
+  try {
+    const testSnap = await db.collection('clans').doc('47261').collection('messages').limit(3).get();
+    console.log(`📊 ТЕСТ: всего документов в messages: ${testSnap.size}`);
+    testSnap.forEach(d => console.log('  -', d.id, d.data().author));
+  } catch(e) {
+    console.log('❌ ТЕСТ ошибка:', e.message);
+  }
+}, 5000);
+
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => console.log(`✅ CHAT:${PORT}`));
