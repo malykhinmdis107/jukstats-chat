@@ -225,5 +225,34 @@ setInterval(() => {
   }
 }, 10 * 60 * 1000);
 
+// Временный эндпоинт — проверка что в коллекции
+app.get('/api/chat/:clanId/debug', async (req, res) => {
+  if (!db) return res.json({ error: 'no db' });
+  try {
+    const snapshot = await db
+      .collection('clans').doc(req.params.clanId)
+      .collection('messages')
+      .limit(5)
+      .get();
+    
+    const docs = [];
+    snapshot.forEach(d => {
+      docs.push({
+        id: d.id,
+        exists: d.exists,
+        data: d.data()
+      });
+    });
+    
+    res.json({ 
+      count: snapshot.size, 
+      empty: snapshot.empty,
+      docs 
+    });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, '0.0.0.0', () => console.log(`✅ CHAT:${PORT}`));
