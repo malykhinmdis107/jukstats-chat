@@ -30,14 +30,19 @@ app.get('/api/chat/:clanId/history', async (req, res) => {
     const snapshot = await db
       .collection('clans').doc(req.params.clanId)
       .collection('messages')
-      .orderBy('id', 'desc').limit(200).get();
+      .orderBy('time', 'desc')
+      .limit(200)
+      .get();
     
     const all = [];
     snapshot.forEach(d => all.push(d.data()));
+    
     const general = all.filter(m => !m.isOfficer).slice(0, 100);
     const officer = all.filter(m => m.isOfficer).slice(0, 100);
-    res.json({ general: general.reverse(), officer: officer.reverse() });
+    
+    res.json({ general, officer });
   } catch(e) {
+    console.error('History error:', e.message);
     res.json({ general: [], officer: [] });
   }
 });
@@ -51,7 +56,7 @@ app.post('/api/chat/:clanId/message', async (req, res) => {
     message.isOfficer = !!isOfficer;
     await db.collection('clans').doc(req.params.clanId)
       .collection('messages').doc(String(message.id)).set(message);
-    broadcast(req.params.clanId, message);
+    broadcast(req.params.clanId, { type: 'new_message', data: message, isOfficer: !!isOfficer });
     res.json({ success: true });
   } catch(e) {
     res.status(500).json({ error: e.message });
@@ -76,7 +81,10 @@ app.get('/api/chat/:clanId/board', async (req, res) => {
   if (!db) return res.json([]);
   try {
     const snap = await db.collection('clans').doc(req.params.clanId)
-      .collection('board').orderBy('id', 'desc').limit(50).get();
+      .collection('board')
+      .orderBy('id', 'desc')
+      .limit(50)
+      .get();
     const board = [];
     snap.forEach(d => board.push(d.data()));
     res.json(board);
@@ -86,8 +94,11 @@ app.get('/api/chat/:clanId/board', async (req, res) => {
 app.post('/api/chat/:clanId/board', async (req, res) => {
   if (!db) return res.json({ success: false });
   try {
+    const item = req.body.item;
+    if (!item?.id) return res.status(400).json({ error: 'no item id' });
     await db.collection('clans').doc(req.params.clanId)
-      .collection('board').doc(String(req.body.item.id)).set(req.body.item);
+      .collection('board').doc(String(item.id)).set(item);
+    broadcast(req.params.clanId, { type: 'board_update', item });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -97,6 +108,7 @@ app.delete('/api/chat/:clanId/board/:itemId', async (req, res) => {
   try {
     await db.collection('clans').doc(req.params.clanId)
       .collection('board').doc(req.params.itemId).delete();
+    broadcast(req.params.clanId, { type: 'board_delete', id: req.params.itemId });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -116,6 +128,27 @@ app.post('/api/chat/:clanId/moderation', async (req, res) => {
   try {
     await db.collection('clans').doc(req.params.clanId)
       .collection('moderation').doc('state').set(req.body);
+    broadcast(req.params.clanId, { type: 'moderation_update' });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
+});
+
+// ===== РОЛИ САЙТА =====
+app.get('/api/chat/:clanId/roles', async (req, res) => {
+  if (!db) return res.json({});
+  try {
+    const doc = await db.collection('clans').doc(req.params.clanId)
+      .collection('moderation').doc('roles').get();
+    res.json(doc.exists ? doc.data() : {});
+  } catch(e) { res.json({}); }
+});
+
+app.post('/api/chat/:clanId/roles', async (req, res) => {
+  if (!db) return res.json({ success: false });
+  try {
+    await db.collection('clans').doc(req.params.clanId)
+      .collection('moderation').doc('roles').set(req.body);
+    broadcast(req.params.clanId, { type: 'role_update' });
     res.json({ success: true });
   } catch(e) { res.status(500).json({ error: e.message }); }
 });
@@ -125,11 +158,28 @@ app.get('/api/chat/:clanId/log', async (req, res) => {
   if (!db) return res.json([]);
   try {
     const snap = await db.collection('clans').doc(req.params.clanId)
-      .collection('logs').orderBy('timestamp', 'desc').limit(100).get();
+      .collection('logs')
+      .orderBy('timestamp', 'desc')
+      .limit(100)
+      .get();
     const log = [];
     snap.forEach(d => log.push(d.data()));
     res.json(log);
   } catch(e) { res.json([]); }
+});
+
+app.post('/api/chat/:clanId/log', async (req, res) => {
+  if (!db) return res.json({ success: false });
+  try {
+    const entry = {
+      ...req.body.entry,
+      timestamp: admin.firestore.FieldValue.serverTimestamp()
+    };
+    await db.collection('clans').doc(req.params.clanId)
+      .collection('logs').add(entry);
+    broadcast(req.params.clanId, { type: 'log_update', entry: req.body.entry });
+    res.json({ success: true });
+  } catch(e) { res.status(500).json({ error: e.message }); }
 });
 
 // ===== WEBSOCKET =====
@@ -147,9 +197,19 @@ function broadcast(clanId, data) {
 }
 
 wss.on('connection', (ws, req) => {
-  const clanId = new URL(req.url, `http://${req.headers.host}`).pathname.split('/').pop();
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const clanId = url.pathname.split('/').pop();
   if (!rooms.has(clanId)) rooms.set(clanId, new Set());
   rooms.get(clanId).add(ws);
+  
+  ws.on('message', data => {
+    try {
+      const msg = JSON.parse(data);
+      rooms.get(clanId)?.forEach(c => {
+        if (c !== ws && c.readyState === WebSocket.OPEN) c.send(JSON.stringify(msg));
+      });
+    } catch(e) {}
+  });
   
   ws.on('close', () => {
     rooms.get(clanId)?.delete(ws);
@@ -159,27 +219,11 @@ wss.on('connection', (ws, req) => {
 
 // Keep-alive
 setInterval(() => {
-  require('https').get(process.env.RENDER_EXTERNAL_URL + '/', () => {});
+  const url = process.env.RENDER_EXTERNAL_URL;
+  if (url) {
+    require('https').get(url + '/', () => {}).on('error', () => {});
+  }
 }, 10 * 60 * 1000);
 
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`✅ CHAT:${PORT}`));
-
-// ===== РОЛИ САЙТА =====
-app.get('/api/chat/:clanId/roles', async (req, res) => {
-  if (!db) return res.json({});
-  try {
-    const doc = await db.collection('clans').doc(req.params.clanId)
-      .collection('moderation').doc('roles').get();
-    res.json(doc.exists ? doc.data() : {});
-  } catch(e) { res.json({}); }
-});
-
-app.post('/api/chat/:clanId/roles', async (req, res) => {
-  if (!db) return res.json({ success: false });
-  try {
-    await db.collection('clans').doc(req.params.clanId)
-      .collection('moderation').doc('roles').set(req.body);
-    res.json({ success: true });
-  } catch(e) { res.status(500).json({ error: e.message }); }
-});
+server.listen(PORT, '0.0.0.0', () => console.log(`✅ CHAT:${PORT}`));
